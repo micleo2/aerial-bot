@@ -8,11 +8,13 @@ const MAX_VEL = 10;
 const SPACE = 32; // key code
 const Vec = p5.Vector;
 
+let c;
 let rocket;
 let bot;
 let path;
-let botTarget;
+let planner;
 let controller;
+let lapDisplay;
 let chart;
 
 let thetaErrSamples;
@@ -26,8 +28,8 @@ function clamp(a, min, max) {
   }
   return a;
 }
-function trunc(n) {
-  return int(n * 1000) / 1000.0;
+function trunc(n, d = 1000) {
+  return int(n * d) / d;
 }
 
 function smoothstep(edge0, edge1, x) {
@@ -49,15 +51,31 @@ function mapb(x, min, max) {
   return map(x, 0, 1, min, max);
 }
 
+function evalBezier(t, p0, p1, p2, p3) {
+  p0 = p0.copy();
+  p1 = p1.copy();
+  p2 = p2.copy();
+  p3 = p3.copy();
+  var one = 1 - t;
+  p0.mult(Math.pow(one, 3));
+  p1.mult(3 * Math.pow(one, 2) * t);
+  p2.mult(3 * one * Math.pow(t, 2));
+  p3.mult(Math.pow(t, 3));
+  return p0.add(p1).add(p2).add(p3);
+}
+
 function setup() {
   frameRate(60);
   createCanvas(1000, 1000);
   globalThis.context = this;
-  rocket = new Rocket(width/2 - 200, height/2);
+  c = createVector;
+
+  rocket = new Rocket(width/2, 200);
   controller = new ControllerInput();
-  botTarget = createVector(width / 2, height / 2);
   bot = new AerialBot(rocket);
   path = new GoalPath();
+  planner = new LinePositionPlanner(path, rocket, bot);
+  lapDisplay = new LapTimeDisplay(path);
   path.addWaypoint(width / 2, 200);
   path.addWaypoint(200, height / 2);
   path.addWaypoint(width / 2, height - 200);
@@ -148,35 +166,43 @@ function draw() {
   // controller.debugDraw();
   // rocket.debugDraw();
 
-  const amp = 200;
-  const phaseMult = 0.01;
-  const phi = frameCount * phaseMult;
-  let x = cos(phi) * amp;
-  let y = sin(phi) * amp;
-  botTarget.x = x + width / 2;
-  botTarget.y = y + height / 2;
-  bot.setTarget(botTarget);
-  noFill();
-  stroke(255, 0, 0, 150);
-  ellipse(width/2, height/2, amp * 2, amp * 2);
+  // const amp = 200;
+  // const phaseMult = 0.01;
+  // const phi = frameCount * phaseMult;
+  // let x = cos(phi) * amp;
+  // let y = sin(phi) * amp;
+  // botTarget.x = x + width / 2;
+  // botTarget.y = y + height / 2;
+  // bot.setTarget(botTarget);
+  // noFill();
+  // stroke(255, 0, 0, 150);
+  // ellipse(width/2, height/2, amp * 2, amp * 2);
+
+  // let pnt = evalBezier((sin(frameCount / 200) + 1) * 0.5, c(width / 2, 200), c(200, height / 2), c(width / 2, height - 200), c(width - 200, height / 2));
+  // botTarget.x = pnt.x;
+  // botTarget.y = pnt.y;
+  // noFill();
+  // bezier(width / 2, 200, 200, height / 2, width / 2, height - 200, width - 200, height / 2);
+
+  planner.update();
+  path.update(rocket.position());
 
   if (mouseIsPressed) {
-    botTarget.x = mouseX;
-    botTarget.y = mouseY;
+    bot.setTarget(c(mouseX, mouseY));
   }
 
-  // let curWay = path.getCurrentWaypoint();
-  // botTarget.set(curWay.x, curWay.y);
-  // path.draw();
-  // path.update(rocket.position());
-
+  lapDisplay.update();
+  lapDisplay.draw();
+  path.draw();
   rocket.draw();
+  drawTarget();
+}
+
+function drawTarget() {
   stroke(0, 255, 0);
   strokeWeight(7);
-  point(botTarget.x, botTarget.y);
+  point(bot.getTarget().x, bot.getTarget().y);
   strokeWeight(1);
-
-  bot.setTarget(botTarget);
 }
 
 // function updateThetaCharts() {
@@ -369,13 +395,16 @@ class AerialBot {
   constructor(rocket) {
     this.rocket = rocket;
     this.orientPID = new PIDController(PI / 2, 2, 0, 50);
-    this.boostPID = new PIDController(height / 2, 0.2, 0, 4);
+    this.boostPID = new PIDController(0, 0.2, 0, 5);
     this.xposPID = new PIDController(width / 2, 0.003, 0, 0.2);
+    this.target = c(width/2, height/2);
   }
 
   update(controller){
     if (controller.holdBoost == false) {
-      const boostOut = -this.boostPID.update(rocket.position().y);
+      let err = this.target.y - rocket.position().y;
+      err -= abs(this.target.x - rocket.position().x) * 0.4;
+      const boostOut = -this.boostPID.updateError(err);
       controller.holdBoost = boostOut > 0;
     }
     if (controller.yaw == 0) {
@@ -390,7 +419,12 @@ class AerialBot {
     }
   }
 
+  getTarget() {
+    return this.target.copy();
+  }
+
   setTarget(pos) {
+    this.target = pos;
     this.xposPID.set(pos.x);
     this.boostPID.set(pos.y);
   }
@@ -422,7 +456,12 @@ class GoalPath {
   constructor() {
     this.waypoints = [];
     this.activeIdx = 0;
-    this.distToPass = 130;
+    this.distToPass = 50;
+    this.observers = [];
+  }
+
+  addObserver(o) {
+    this.observers.push(o);
   }
 
   addWaypoint(x, y) {
@@ -431,6 +470,17 @@ class GoalPath {
 
   getCurrentWaypoint() {
     return this.waypoints[this.activeIdx];
+  }
+
+  getNextN(N) {
+    var ret = [];
+    let idx = this.activeIdx;
+    for (let i = 0; i < N; i++) {
+      ret.push(this.waypoints[idx]);
+      idx++;
+      idx %= this.waypoints.length;
+    }
+    return ret;
   }
 
   draw() {
@@ -450,6 +500,100 @@ class GoalPath {
     if (Vec.dist(curTarget, pos) < this.distToPass) {
       this.activeIdx++;
       this.activeIdx %= this.waypoints.length;
+      for (let o of this.observers) {
+        o.onWaypointHit();
+      }
     }
   }
 }
+
+class LapTimeDisplay {
+  constructor(path) {
+    path.addObserver(this);
+    this.path = path;
+    this.curLapTime = 0;
+    this.lapTimes = [];
+  }
+  onWaypointHit() {
+    if (this.path.activeIdx == 1 && this.curLapTime != 0){
+      this.lapTimes.push(this.curLapTime);
+      this.curLapTime = 0;
+      if (this.lapTimes.length > 5) {
+        this.lapTimes.shift();
+      }
+    }
+  }
+  update() {
+    this.curLapTime += deltaTime;
+  }
+  draw() {
+    textSize(40);
+    textAlign(CENTER);
+    noStroke();
+    fill(0);
+    text(trunc(this.curLapTime / 1000, 10), width/2, 40);
+    var y = 30;
+    const spacing = 30;
+    textSize(30);
+    textAlign(RIGHT);
+    for (let i = 0; i < this.lapTimes.length; i++) {
+      let idx = this.lapTimes.length - i - 1;
+      text(trunc(this.lapTimes[idx] / 1000, 10), width - 10, y);
+      y += spacing;
+    }
+  }
+}
+
+class NaivePositionPlanner {
+  constructor(path, rocket, bot) {
+    this.path = path;
+    this.rocket = rocket;
+    this.bot = bot;
+  }
+  update() {
+    let curWay = this.path.getCurrentWaypoint();
+    this.bot.setTarget(c(curWay.x, curWay.y));
+  }
+}
+
+class LinePositionPlanner {
+  constructor(path, rocket, bot) {
+    path.addObserver(this);
+    this.path = path;
+    this.rocket = rocket;
+    this.bot = bot;
+    this.begin = c();
+    this.end = c();
+    this.fac = 0;
+  }
+  onWaypointHit() {
+    this.begin = this.rocket.position().copy();
+    this.end = this.path.getCurrentWaypoint();
+    this.fac = 0;
+  }
+  update() {
+    let blended = vecMix(this.begin, this.end, this.fac);
+    this.fac += 0.009;
+    this.fac = clamp(this.fac, 0, 1);
+    this.bot.setTarget(blended);
+  }
+}
+
+// /// Core idea: enter into the current waypoint with velocity aimed at the next one.
+// class MomentumPositionPlanner {
+//   constructor(path, rocket, bot) {
+//     this.path = path;
+//     this.rocket = rocket;
+//     this.bot = bot;
+//     this.facPID = new PIDController();
+//   }
+//
+//   update() {
+//     const [cur, next] = this.path.getNextN(2);
+//     let fac = Vec.dist(this.rocket.position(), cur) / 300;
+//     fac = clamp(fac, 0, 1);
+//     fac = 1 - fac;
+//     let blended = vecMix(cur, next, fac);
+//     this.bot.setTarget(blended);
+//   }
+// }
