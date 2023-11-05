@@ -16,6 +16,7 @@ let planner;
 let controller;
 let lapDisplay;
 let chart;
+let disabled = false;
 
 let thetaErrSamples;
 let derivativeErrSamples;
@@ -73,17 +74,12 @@ function setup() {
   rocket = new Rocket(width/2, 200);
   controller = new ControllerInput();
   bot = new AerialBot(rocket);
-  path = new GoalPath();
-  planner = new LinePositionPlanner(path, rocket, bot);
-  lapDisplay = new LapTimeDisplay(path);
-  path.addWaypoint(width / 2, 200);
-  path.addWaypoint(200, height / 2);
-  path.addWaypoint(width / 2, height - 200);
-  path.addWaypoint(width - 200, height / 2);
+  path = diamondPath();
+  planner = new NaivePositionPlanner(path, rocket, bot);
+  lapDisplay = new LapTimeDisplay(path, rocket, controller);
 
-  thetaErrSamples = new SizedArray(60 * 2, 0);
-  derivativeErrSamples = new SizedArray(60 * 2, 0);
-
+  // thetaErrSamples = new SizedArray(60 * 2, 0);
+  // derivativeErrSamples = new SizedArray(60 * 2, 0);
   // chart = new CanvasJS.Chart("graph", {
   //   interactivityEnabled: false,
   //   axisX: {
@@ -106,50 +102,44 @@ function setup() {
   //   }]
   // });
   //
-
-  var options = {
-    chart: {
-      type: 'line',
-      height: 350,
-      width: width,
-      animations: {
-        enabled: false,
-        // easing: 'linear',
-        // dynamicAnimation: {
-        //   speed: 1000
-        // }
-      },
-    },
-    dataLabels: {
-      enabled: false
-    },
-    stroke: {
-      curve: 'smooth',
-    },
-    tooltip: {
-      enabled: false,
-    },
-    legend: {
-      show: false,
-    },
-    yaxis: {
-      min: -PI,
-      max: PI,
-      labels: {
-          show: false,
-      },
-    },
-    xaxis: {
-      labels: {
-          show: false,
-      }
-    },
-    series: [{
-      name: 'theta',
-      data: []
-    }],
-  }
-
+  // var options = {
+  //   chart: {
+  //     type: 'line',
+  //     height: 350,
+  //     width: width,
+  //     animations: {
+  //       enabled: false,
+  //     },
+  //   },
+  //   dataLabels: {
+  //     enabled: false
+  //   },
+  //   stroke: {
+  //     curve: 'smooth',
+  //   },
+  //   tooltip: {
+  //     enabled: false,
+  //   },
+  //   legend: {
+  //     show: false,
+  //   },
+  //   yaxis: {
+  //     min: -PI,
+  //     max: PI,
+  //     labels: {
+  //         show: false,
+  //     },
+  //   },
+  //   xaxis: {
+  //     labels: {
+  //         show: false,
+  //     }
+  //   },
+  //   series: [{
+  //     name: 'theta',
+  //     data: []
+  //   }],
+  // }
   // chart = new ApexCharts(document.querySelector("#graph"), options);
   // chart.render();
 }
@@ -157,9 +147,14 @@ function setup() {
 function draw() {
   background(50);
 
-  controller.setFromUser();
-  bot.update(controller);
-  rocket.updateWithInput(controller);
+  if (!disabled) {
+    controller.setFromUser();
+    bot.update(controller);
+    rocket.updateWithInput(controller);
+    planner.update();
+    path.update(rocket.position());
+    lapDisplay.update();
+  }
 
   // textSize(22);
   // fill(255, 0, 0);
@@ -184,18 +179,20 @@ function draw() {
   // noFill();
   // bezier(width / 2, 200, 200, height / 2, width / 2, height - 200, width - 200, height / 2);
 
-  planner.update();
-  path.update(rocket.position());
-
   if (mouseIsPressed) {
     bot.setTarget(c(mouseX, mouseY));
   }
 
-  lapDisplay.update();
-  lapDisplay.draw();
   path.draw();
   rocket.draw();
+  lapDisplay.draw();
   drawTarget();
+}
+
+function keyPressed() {
+  if (key == 'p') {
+    disabled = true;
+  }
 }
 
 function drawTarget() {
@@ -328,11 +325,20 @@ class Rocket {
       translate(0, this.height/2);
       triangle(w, 0, -w, 0, 0, this.height/4);
       pop();
+      if (this.vel.mag() >= (MAX_VEL - 0.01)) {
+        stroke(255);
+        strokeWeight(2);
+        var yend = -this.height / 2 - 10;
+        var xbegin = -this.width/2-10;
+        line(xbegin, 0, 0, yend);
+        line(-xbegin, 0, 0, yend);
+      }
     }
 
     // draw ground truth point
     fill(0);
     strokeWeight(5);
+    stroke(0);
     point(0, 0);
 
     pop();
@@ -361,6 +367,15 @@ class Rocket {
   orientation() {
     return this.angle;
   }
+}
+
+function diamondPath() {
+  let path = new GoalPath();
+  path.addWaypoint(width / 2, 200);
+  path.addWaypoint(200, height / 2);
+  path.addWaypoint(width / 2, height - 200);
+  path.addWaypoint(width - 200, height / 2);
+  return path;
 }
 
 class PIDController {
@@ -396,7 +411,7 @@ class AerialBot {
     this.rocket = rocket;
     this.orientPID = new PIDController(PI / 2, 2, 0, 50);
     this.boostPID = new PIDController(0, 0.2, 0, 5);
-    this.xposPID = new PIDController(width / 2, 0.003, 0, 0.2);
+    this.xposPID = new PIDController(width / 2, 0.003, 0, 0.1);
     this.target = c(width/2, height/2);
   }
 
@@ -413,8 +428,9 @@ class AerialBot {
 
       // tilt off from 90deg.
       let angleTilt = -this.xposPID.update(rocket.position().x);
-      const MAX_TILT = radians(35);
+      const MAX_TILT = radians(55);
       angleTilt = clamp(angleTilt, -MAX_TILT, MAX_TILT);
+      // if (abs(angleTilt) == MAX_TILT) console.log("maxing out tilt");
       this.orientPID.set(angleTilt + PI / 2);
     }
   }
@@ -456,7 +472,7 @@ class GoalPath {
   constructor() {
     this.waypoints = [];
     this.activeIdx = 0;
-    this.distToPass = 50;
+    this.distToPass = 80;
     this.observers = [];
   }
 
@@ -508,11 +524,15 @@ class GoalPath {
 }
 
 class LapTimeDisplay {
-  constructor(path) {
+  constructor(path, rocket, controller) {
     path.addObserver(this);
     this.path = path;
+    this.rocket = rocket;
+    this.controller = controller;
     this.curLapTime = 0;
     this.lapTimes = [];
+    this.curPath = [];
+    this.ghostPaths = [];
   }
   onWaypointHit() {
     if (this.path.activeIdx == 1 && this.curLapTime != 0){
@@ -521,10 +541,20 @@ class LapTimeDisplay {
       if (this.lapTimes.length > 5) {
         this.lapTimes.shift();
       }
+      this.ghostPaths.push(this.curPath);
+      if (this.ghostPaths.length > 3) {
+        this.ghostPaths.shift();
+      }
+      this.curPath = [];
     }
   }
   update() {
     this.curLapTime += deltaTime;
+    this.curPath.push({ 
+      pos: this.rocket.position().copy(),
+      boost: this.controller.holdBoost,
+      angle: this.rocket.orientation(),
+    });
   }
   draw() {
     textSize(40);
@@ -541,6 +571,26 @@ class LapTimeDisplay {
       text(trunc(this.lapTimes[idx] / 1000, 10), width - 10, y);
       y += spacing;
     }
+
+    noFill();
+    colorMode(HSB, 255);
+    let hue = 0;
+    for (let pth of [...this.ghostPaths, this.curPath]) {
+      for (let i = 0; i < pth.length - 1; i++) {
+        let curPos = pth[i].pos;
+        let nextPos = pth[i + 1].pos;
+        // stroke(hue, 100, pth[i].boost * 100 + 150);
+        stroke(hue, 100, 150);
+        strokeWeight(2);
+        line(curPos.x, curPos.y, nextPos.x, nextPos.y);
+        let dir = Vec.fromAngle(-pth[i].angle).mult(10);
+        strokeWeight(1);
+        line(curPos.x, curPos.y, curPos.x + dir.x, curPos.y + dir.y);
+      }
+      hue += 80;
+      hue %= 255;
+    }
+    colorMode(RGB, 255);
   }
 }
 
@@ -567,7 +617,7 @@ class LinePositionPlanner {
     this.fac = 0;
   }
   onWaypointHit() {
-    this.begin = this.rocket.position().copy();
+    this.begin = this.end.copy();
     this.end = this.path.getCurrentWaypoint();
     this.fac = 0;
   }
