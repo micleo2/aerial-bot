@@ -1,8 +1,6 @@
 var enableBot = true;
-var p = console.log;
 
 const GRAVITY = 0.175;
-// const GRAVITY = 0;
 const BOOST_ACCEL = 0.4;
 const YAW_ACCEL = 0.002;
 const ANG_VEL_DAMPING = 0.90;
@@ -71,18 +69,19 @@ function evalBezier(t, p0, p1, p2, p3) {
 
 function setup() {
   frameRate(60);
-  createCanvas(1800, 1000);
+  createCanvas(1000, 1000);
   globalThis.context = this;
   c = createVector;
 
   path = oscillatingPath();
+  // path = diamondPath();
   let firstWaypnt = path.getNextN(1)[0];
   rocket = new Rocket(firstWaypnt.x, firstWaypnt.y);
   cam = new Camera(rocket);
   starField = new StarField(cam);
   controller = new ControllerInput();
   bot = new AerialBot(rocket);
-  planner = new LinePositionPlanner(path, rocket, bot);
+  planner = new CurvePositionPlanner(path, rocket, bot);
   lapDisplay = new LapTimeDisplay(path, rocket, controller);
 }
 
@@ -100,29 +99,6 @@ function draw() {
     lapDisplay.update();
   }
 
-  // textSize(22);
-  // fill(255, 0, 0);
-  // controller.debugDraw();
-  // rocket.debugDraw();
-
-  // const amp = 200;
-  // const phaseMult = 0.01;
-  // const phi = frameCount * phaseMult;
-  // let x = cos(phi) * amp;
-  // let y = sin(phi) * amp;
-  // botTarget.x = x + width / 2;
-  // botTarget.y = y + height / 2;
-  // bot.setTarget(botTarget);
-  // noFill();
-  // stroke(255, 0, 0, 150);
-  // ellipse(width/2, height/2, amp * 2, amp * 2);
-
-  // let pnt = evalBezier((sin(frameCount / 200) + 1) * 0.5, c(width / 2, 200), c(200, height / 2), c(width / 2, height - 200), c(width - 200, height / 2));
-  // botTarget.x = pnt.x;
-  // botTarget.y = pnt.y;
-  // noFill();
-  // bezier(width / 2, 200, 200, height / 2, width / 2, height - 200, width - 200, height / 2);
-
   if (mouseIsPressed) {
     bot.setTarget(c(mouseX, mouseY));
   }
@@ -134,6 +110,7 @@ function draw() {
   cam.setup();
   path.draw();
   rocket.draw();
+  if (planner.draw) planner.draw();
   // lapDisplay.draw();
   drawTarget();
   cam.teardown();
@@ -312,7 +289,8 @@ class Rocket {
 
 function oscillatingPath() {
   var N = 200;
-  const xStep = 300;
+  // const xStep = 300;
+  const xStep = 225;
   const freq = 1;
   const yGap = 300;
   var path = new GoalPath();
@@ -645,10 +623,49 @@ class CurvePositionPlanner {
     this.path = path;
     this.rocket = rocket;
     this.bot = bot;
+    this.lastWaypnt = this.rocket.position().copy();
+    this.curve = [c(0, 0), c(0, 0), c(0, 0), c(0, 0)];
   }
   onWaypointHit() {
+    let pnts = this.path.getNextN(2);
+    let dirAfter = Vec.sub(pnts[1], pnts[0]);
+    // let p0 = this.rocket.position().copy();
+    // let p0 = this.lastWaypnt;
+    let p0 = this.bot.getTarget();
+    let p1 = p0;
+    let p2 = Vec.add(pnts[0], dirAfter.mult(-0.75));
+    let p3 = pnts[0];
+    this.curve = [p0, p1, p2, p3];
+    this.fac = 0;
+    this.lastWaypnt = pnts[0].copy();
   }
   update() {
+    let [p0, p1, p2, p3] = this.curve;
+    let slidingPnt = evalBezier(this.fac, p0, p1, p2, p3);
+    let lastCandidate = slidingPnt;
+    let curDist = slidingPnt.dist(this.rocket.position());
+    let vel = this.rocket.velocity().copy().normalize();
+    for (let f = this.fac + .005; f < 1; f += .005) {
+      let candidate = evalBezier(f, p0, p1, p2, p3);
+      let d = candidate.dist(this.rocket.position());
+      let desiredVel = Vec.sub(candidate, lastCandidate).normalize();
+      let dot = Vec.dot(vel, desiredVel);
+      dot = (dot + 1) / 2;
+      if (d < curDist && dot > 0.99) {
+        this.fac = f;
+        slidingPnt = candidate;
+      }
+      lastCandidate = candidate;
+    }
+    this.fac += 0.009;
+    this.fac = clamp(this.fac, 0, 1);
+    this.bot.setTarget(slidingPnt);
+  }
+  draw() {
+    let [p0, p1, p2, p3] = this.curve;
+    noFill();
+    stroke(0, 255, 0);
+    bezier(p0.x, p0.y, p1.x, p1.y, p2.x, p2.y, p3.x, p3.y);
   }
 }
 
@@ -680,20 +697,21 @@ class StarField {
       let sz = mapb(Math.random(), SZ_RANGE[0], SZ_RANGE[1]);
       let x = mapb(Math.random(), sz, width - sz);
       let y = mapb(Math.random(), sz, height - sz);
-      let flicker = mapb(Math.random(), 100, 300);
+      let flicker = Math.random() > 0.5 ? 1 : 0;
       this.stars.push({x, y, sz, flicker});
     }
   }
   draw() {
     const parallaxMult = 0.02;
+    const flickerRate = 150;
     for (let i = 0; i < this.stars.length; i++) {
       let {x, y, sz, flicker} = this.stars[i];
       x += -this.camera.position().x * sz * parallaxMult;
       if (x < 0)
         x += width * ceil(abs(x) / width)
       noStroke();
-      let a = 150;
-      if (floor((frameCount + x) / flicker) % 2 == 0) {
+      let a = 200;
+      if (floor((frameCount) / flickerRate) % 2 == flicker) {
         a -= 100;
       }
       fill(140, 140, 140, a);
