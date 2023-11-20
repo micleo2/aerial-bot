@@ -1,4 +1,5 @@
 var enableBot = true;
+var p = console.log;
 
 const GRAVITY = 0.175;
 // const GRAVITY = 0;
@@ -12,6 +13,8 @@ const Vec = p5.Vector;
 
 let c;
 let rocket;
+let cam;
+let starField;
 let bot;
 let path;
 let planner;
@@ -68,14 +71,17 @@ function evalBezier(t, p0, p1, p2, p3) {
 
 function setup() {
   frameRate(60);
-  createCanvas(1000, 1000);
+  createCanvas(1800, 1000);
   globalThis.context = this;
   c = createVector;
 
-  rocket = new Rocket(width/2, 200);
+  path = oscillatingPath();
+  let firstWaypnt = path.getNextN(1)[0];
+  rocket = new Rocket(firstWaypnt.x, firstWaypnt.y);
+  cam = new Camera(rocket);
+  starField = new StarField(cam);
   controller = new ControllerInput();
   bot = new AerialBot(rocket);
-  path = diamondPath();
   planner = new LinePositionPlanner(path, rocket, bot);
   lapDisplay = new LapTimeDisplay(path, rocket, controller);
 }
@@ -121,10 +127,16 @@ function draw() {
     bot.setTarget(c(mouseX, mouseY));
   }
 
+  // Star field manages its own parallax effect, so draw
+  // it outside of the camera screen space translation.
+  starField.draw();
+
+  cam.setup();
   path.draw();
   rocket.draw();
-  lapDisplay.draw();
+  // lapDisplay.draw();
   drawTarget();
+  cam.teardown();
 }
 
 function keyPressed() {
@@ -221,7 +233,7 @@ class Rocket {
       this.vel.setMag(MAX_VEL);
     }
     this.pos.add(this.vel);
-    this.wrapBounds();
+    // this.wrapBounds();
   }
 
   wrapBounds() {
@@ -296,6 +308,21 @@ class Rocket {
   orientation() {
     return this.angle;
   }
+}
+
+function oscillatingPath() {
+  var N = 200;
+  const xStep = 300;
+  const freq = 1;
+  const yGap = 300;
+  var path = new GoalPath();
+  for (var i = 0; i < N; i++) {
+    var x = i * xStep;
+    var y = sin(x);
+    y = map(y, -1, 1, yGap, height - yGap);
+    path.addWaypoint(x, y);
+  }
+  return path;
 }
 
 function diamondPath() {
@@ -612,4 +639,65 @@ class LinePositionPlanner {
     this.bot.setTarget(blended);
   }
 }
+class CurvePositionPlanner {
+  constructor(path, rocket, bot) {
+    path.addObserver(this);
+    this.path = path;
+    this.rocket = rocket;
+    this.bot = bot;
+  }
+  onWaypointHit() {
+  }
+  update() {
+  }
+}
 
+class Camera {
+  constructor(p) {
+    this.rocket = rocket;
+    this.pos = c(0, 0);
+  }
+  setup() {
+    push();
+    this.pos.set(this.rocket.position().x, height / 2);
+    translate(-this.rocket.position().x + width / 2, 0);
+  }
+  position() {
+    return this.pos;
+  }
+  teardown() {
+    pop();
+  }
+}
+
+class StarField {
+  constructor(cam) {
+    this.camera = cam;
+    this.N = 50;
+    this.stars = [];
+    const SZ_RANGE = [1, 7];
+    for (let i = 0; i < this.N; i++) {
+      let sz = mapb(Math.random(), SZ_RANGE[0], SZ_RANGE[1]);
+      let x = mapb(Math.random(), sz, width - sz);
+      let y = mapb(Math.random(), sz, height - sz);
+      let flicker = mapb(Math.random(), 100, 300);
+      this.stars.push({x, y, sz, flicker});
+    }
+  }
+  draw() {
+    const parallaxMult = 0.02;
+    for (let i = 0; i < this.stars.length; i++) {
+      let {x, y, sz, flicker} = this.stars[i];
+      x += -this.camera.position().x * sz * parallaxMult;
+      if (x < 0)
+        x += width * ceil(abs(x) / width)
+      noStroke();
+      let a = 150;
+      if (floor((frameCount + x) / flicker) % 2 == 0) {
+        a -= 100;
+      }
+      fill(140, 140, 140, a);
+      ellipse(x, y, sz, sz);
+    }
+  }
+}
