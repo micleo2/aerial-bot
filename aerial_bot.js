@@ -1,4 +1,4 @@
-var enableBot = true;
+var enableBot = false;
 
 const GRAVITY = 0.175;
 const BOOST_ACCEL = 0.4;
@@ -210,16 +210,19 @@ class Rocket {
       this.vel.setMag(MAX_VEL);
     }
     this.pos.add(this.vel);
-    // this.wrapBounds();
+    this.wrapBounds();
   }
 
   wrapBounds() {
-    if (this.pos.x < 0) {
-      this.pos.x = width;
+    if (this.pos.y > height) {
+      this.pos.y = 0;
     }
-    if (this.pos.x > width) {
-      this.pos.x = 0;
+    if (this.pos.y < 0) {
+      this.pos.y = height;
     }
+    // if (this.pos.x > width) {
+    //   this.pos.x = 0;
+    // }
   }
 
   draw() {
@@ -228,6 +231,11 @@ class Rocket {
     rotate(-this.angle + PI/2);
 
     fill(200);
+    colorMode(HSB, 255);
+    if (this.boosting){
+      fill((frameCount * 3) % 255,192,203);
+    }
+    colorMode(RGB, 255);
     strokeWeight(1);
     stroke(0);
     rect(-this.width/2, -this.height/2, this.width, this.height);
@@ -692,9 +700,8 @@ class StarField {
     this.camera = cam;
     this.N = 50;
     this.stars = [];
-    const SZ_RANGE = [1, 7];
     for (let i = 0; i < this.N; i++) {
-      let sz = mapb(Math.random(), SZ_RANGE[0], SZ_RANGE[1]);
+      let sz = Math.random();
       let x = mapb(Math.random(), sz, width - sz);
       let y = mapb(Math.random(), sz, height - sz);
       let flicker = Math.random() > 0.5 ? 1 : 0;
@@ -704,18 +711,26 @@ class StarField {
   draw() {
     const parallaxMult = 0.02;
     const flickerRate = 150;
+    const SZ_RANGE = [1, 7];
     for (let i = 0; i < this.stars.length; i++) {
       let {x, y, sz, flicker} = this.stars[i];
-      x += -this.camera.position().x * sz * parallaxMult;
+      let rad = mapb(sz, SZ_RANGE[0], SZ_RANGE[1]);
+      let speed = mapb(sz, 1, 70);
+      x += -this.camera.position().x * speed * parallaxMult;
       if (x < 0)
         x += width * ceil(abs(x) / width)
       noStroke();
       let a = 200;
+      colorMode(HSB, 255);
       if (floor((frameCount) / flickerRate) % 2 == flicker) {
         a -= 100;
       }
       fill(140, 140, 140, a);
-      ellipse(x, y, sz, sz);
+      if (rocket.boosting) {
+        fill(((frameCount + 200) * 3) % 255,192,203);
+      }
+      ellipse(x, y, rad, rad);
+      colorMode(RGB, 255);
     }
   }
 }
