@@ -33,7 +33,7 @@ def key_released():
     global keys
     keys[key.name.upper()] = False
     if key.name.upper() == "S":
-        opti_get_frame_input()
+        opti_get_frame_input(path.get_next_n(2))
 def key_is_down(k):
     global keys
     return keys.get(str(k).upper(), False)
@@ -60,37 +60,43 @@ def pos_update():
     if pos.x < 0:
         pos.x = width
 
-def opti_get_frame_input():
+def opti_get_frame_input(waypnts):
     global pos, vel, accel
     global vel_limit, accel_thrust, vel_dampening
-    N = 100 # number of frames to compute ahead of time.
-    opti = Opti() # Optimization problem
+    # Number of frames to compute ahead of time, the horizon width.
+    N = 250 
+    NW = len(waypnts)
+    opti = Opti()
 
     # ---- decision variables ---------
-    X       = opti.variable(4,N+1) # state trajectory
+    # state trajectory
+    X       = opti.variable(4,N+1)
     posx    = X[0,:]
     posy    = X[1,:]
     velx    = X[2,:]
     vely    = X[3,:]
-    # acceleration x
-    U = opti.variable(2,N)  # control trajectory (throttle x,y)
+    # ---- progress variables ---------
+    # each waypoint has a 'progress' state. This state begins at 1, and will be
+    # decremented to 0 when the waypoint is marked as completed.
+    progress = opti.variable(NW,N+1)
+    progress_change = opti.variable(NW,N+1)
+    slack_dist = opti.variable(NW,N+1)
+    allowed_slack = opti.parameter()
+    opti.set_value(allowed_slack, wp_thresh)
+    # ---- control variables ---------
+    # acceleration x,y
+    U = opti.variable(2,N)
     Ux = U[0,:]
     Uy = U[1,:]
-    # T = opti.variable()      # final time
-
-    # ---- parameters ---------
-    goal_px = opti.parameter()
-    opti.set_value(goal_px, target_pos.x)
 
     # ---- objective          ---------
-    # opti.minimize(T) # race in minimal time
-    opti.minimize((posx[-1] - target_pos.x) ** 2 + (posy[-1] - target_pos.y) ** 2) # minimize dist to the target
+    opti.minimize((posx[-1] - waypnts[-1].x) ** 2 + (posy[-1] - waypnts[-1].y) ** 2)
 
-    # ---- dynamic constraints --------
     # f = lambda x,u: vertcat(x[1],u-x[1]) # dx/dt = f(x,u)
     xdot = lambda x, u: vertcat(x[1], x[1] + u[0])
 
-    for k in range(N): # loop over control intervals
+    for k in range(N):
+       # ---- dynamic constraints --------
        x_k = X[:,k]
        posx_k = x_k[0]
        posy_k = x_k[1]
@@ -105,23 +111,48 @@ def opti_get_frame_input():
                (velx_k + Ux_k) * vel_dampening,
                (vely_k + Uy_k) * vel_dampening)
        # Apply dynamics as a constraint
-       opti.subject_to(X[:,k+1]==x_next)
+       opti.subject_to(X[:,k+1] == x_next)
        # Enforce physics limits
        opti.subject_to((velx_k ** 2 + vely_k ** 2) <= vel_limit ** 2)
        # Enforce actuator limits
        opti.subject_to((Ux_k ** 2 + Uy_k ** 2) <= accel_thrust ** 2)
 
+       # ---- progress constraints --------
+       prog_k = progress[:, k]
+       prog_change_k = progress_change[:, k]
+       prog_next = prog_k - prog_change_k
+       opti.subject_to(progress[:, k+1] == prog_next)
+       for j in range(NW):
+           # CPC
+           waypnt_pos = waypnts[j]
+           dist_to_waypnt = (posx_k - waypnt_pos.x) ** 2 + (posy_k - waypnt_pos.y) ** 2
+           # allowed_slack = slack_dist[j, k]
+           opti.subject_to(prog_change_k[j] * (dist_to_waypnt * allowed_slack) == 0)
+           opti.subject_to(opti.bounded(0, allowed_slack, wp_thresh))
+           # enforce waypoints are visited in order.
+           if j < NW - 1:
+               opti.subject_to(prog_k[j] <= prog_k[j+1])
+       opti.subject_to(opti.bounded(0, prog_k, 1))
+       opti.subject_to(opti.bounded(0, prog_change_k, 1))
+
     # ---- boundary conditions --------
-    opti.subject_to(posx[0]==pos.x) # start at current position.
-    opti.subject_to(posy[0]==pos.y) # start at current position.
-    opti.subject_to(velx[0]==vel.x) # with current vel
-    opti.subject_to(vely[0]==vel.y) # with current vel
-    opti.subject_to(posx[-1]==target_pos.x)  # finish at target
-    opti.subject_to(posy[-1]==target_pos.y)  # finish at target
-    opti.subject_to(velx[-1]==0) # at a stop
-    opti.subject_to(vely[-1]==0) # at a stop
-    opti.subject_to(velx[-2]==0) # at a stop
-    opti.subject_to(vely[-2]==0) # at a stop
+    # state conditions
+    opti.subject_to(posx[0] == pos.x) # start at current position.
+    opti.subject_to(posy[0] == pos.y) # start at current position.
+    opti.subject_to(velx[0] == vel.x) # with current vel
+    opti.subject_to(vely[0] == vel.y) # with current vel
+    # opti.subject_to(posx[-1] == waypnts[-1].x)  # finish at target
+    # opti.subject_to(posy[-1] == waypnts[-1].y)  # finish at target
+    # opti.subject_to(velx[-1] == 0) # at a stop
+    # opti.subject_to(vely[-1] == 0) # at a stop
+    # opti.subject_to(velx[-2] == 0) # at a stop
+    # opti.subject_to(vely[-2] == 0) # at a stop
+
+    # ---- progress conditions --------
+    # progress variables all begin at 1
+    opti.subject_to(progress[:, 0] == 1)
+    # and all end at 0, meaning all waypoints have been visited.
+    opti.subject_to(progress[:, -1] == 0)
 
     # ---- initial values for solver ---
     opti.set_initial(velx, -1)
@@ -130,7 +161,9 @@ def opti_get_frame_input():
     p_opts = dict(print_time=False, verbose=False)
     s_opts = dict(print_level=0)
     opti.solver("ipopt", p_opts, s_opts) # set numerical backend
+    # budget of ~18ms.
     sol = opti.solve()   # actual solve
+    print("progress sol", sol.value(progress))
     global U_sol, u_idx
     U_sol = sol.value(U)
     u_idx = 0
@@ -181,9 +214,9 @@ class GoalPath:
         ret = []
         idx = self.active_idx
         for i in range(N):
-            ret.push(self.waypoints[idx])
+            ret.append(self.waypoints[idx])
             idx += 1
-            idx %= self.waypoints.length
+            idx %= len(self.waypoints)
         return ret
     def draw(self):
         N = len(self.waypoints)
