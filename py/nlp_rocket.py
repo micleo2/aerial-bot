@@ -43,7 +43,7 @@ def key_is_down(k):
     return keys.get(str(k).upper(), False)
 
 def solve_input(waypnts):
-    global rocket
+    global rocket, wp_thresh
     # Number of frames to compute ahead of time, the horizon width.
     N = 200
     opti = ca.Opti()
@@ -57,6 +57,7 @@ def solve_input(waypnts):
     vely      = X[3,:]
     theta     = X[4,:]
     theta_dot = X[5,:]
+    dists     = opti.variable(N)
     # ---- control variables ---------
     # yaw, hold_boost
     U = opti.variable(2,N)
@@ -64,38 +65,43 @@ def solve_input(waypnts):
     Uboost = U[1,:]
 
     # ---- objective          ---------
-    opti.minimize((posx[-1] - waypnts[0].x) ** 2 + (posy[-1] - waypnts[0].y) ** 2)
+    opti.minimize(ca.sum1(dists))
 
     for k in range(N):
        # ---- dynamic constraints --------
-       x_k = X[:,k]
-       posx_k = x_k[0]
-       posy_k = x_k[1]
-       velx_k = x_k[2]
-       vely_k = x_k[3]
-       theta_k = x_k[4]
-       theta_dot_k = x_k[5]
-       U_k = U[:,k]
-       Uyaw_k = U_k[0]
-       Uboost_k = U_k[1]
-       # step_boost = 1 / (1 + ca.exp(-Uboost_k))
-       step_boost = 0.5 + 0.5 * (ca.tanh(500 * Uboost_k - 3))
-       velx_next = velx_k + step_boost * ca.cos(theta_k) * BOOST_ACCEL
-       vely_next = vely_k + step_boost * -ca.sin(theta_k) * BOOST_ACCEL
-       theta_dot_next = (theta_dot_k + Uyaw_k * YAW_ACCEL) * ANG_VEL_DAMPING
-       x_next = ca.vertcat(
-               posx_k + velx_k,
-               posy_k + vely_k,
-               velx_next,
-               vely_next,
-               theta_k + theta_dot_k,
-               theta_dot_next)
-       # Apply dynamics as a constraint
-       opti.subject_to(X[:,k+1] == x_next)
-       # Enforce limits
-       opti.subject_to((velx_k ** 2 + vely_k ** 2) <= MAX_VEL ** 2)
-       opti.subject_to(theta_dot_k >= -MAX_ANG_VEL)
-       opti.subject_to(theta_dot_k <= MAX_ANG_VEL)
+        x_k = X[:,k]
+        posx_k = x_k[0]
+        posy_k = x_k[1]
+        velx_k = x_k[2]
+        vely_k = x_k[3]
+        theta_k = x_k[4]
+        theta_dot_k = x_k[5]
+        U_k = U[:,k]
+        Uyaw_k = U_k[0]
+        Uboost_k = U_k[1]
+        step_boost = 0.5 + 0.5 * (ca.tanh(500 * Uboost_k - 20))
+        velx_next = velx_k + step_boost * ca.cos(theta_k) * BOOST_ACCEL
+        vely_next = vely_k + step_boost * -ca.sin(theta_k) * BOOST_ACCEL
+        theta_dot_next = (theta_dot_k + Uyaw_k * YAW_ACCEL) * ANG_VEL_DAMPING
+        x_next = ca.vertcat(
+            posx_k + velx_k,
+            posy_k + vely_k,
+            velx_next,
+            vely_next,
+            theta_k + theta_dot_k,
+            theta_dot_next
+            )
+        # Apply dynamics as a constraint
+        opti.subject_to(X[:,k+1] == x_next)
+        # Enforce limits
+        opti.subject_to(opti.bounded(-MAX_VEL, velx_k, MAX_VEL))
+        opti.subject_to(opti.bounded(-MAX_VEL, vely_k, MAX_VEL))
+        opti.subject_to((velx_k ** 2 + vely_k ** 2) <= MAX_VEL ** 2)
+        opti.subject_to(opti.bounded(-MAX_ANG_VEL, theta_dot_k, MAX_ANG_VEL))
+        opti.subject_to(theta_dot_k >= -MAX_ANG_VEL)
+        opti.subject_to(theta_dot_k <= MAX_ANG_VEL)
+        dist_to_target = (posx_k - waypnts[0].x) ** 2 + (posy_k - waypnts[0].y) ** 2
+        opti.subject_to(dists[k] == dist_to_target)
 
     pos = rocket.pos
     vel = rocket.vel
@@ -106,17 +112,16 @@ def solve_input(waypnts):
     opti.subject_to(theta[0] == rocket.angle)
     opti.subject_to(theta_dot[0] == rocket.angular_vel)
 
-    opti.subject_to(posx[-1] == waypnts[0].x)  # finish at target
-    opti.subject_to(posy[-1] == waypnts[0].y)  # finish at target
-    opti.subject_to(velx[-1] == 0) # with 0 vel
-    opti.subject_to(vely[-1] == 0) # with 0 vel
+    opti.subject_to(dists[-1] <= wp_thresh)
+    opti.subject_to(opti.bounded(0, Uboost, 1))
     opti.subject_to(Uboost >= 0)
     opti.subject_to(Uboost <= 1)
+    opti.subject_to(opti.bounded(-1, Uyaw, 1))
     opti.subject_to(Uyaw >= -1)
     opti.subject_to(Uyaw <= 1)
 
     p_opts = dict(print_time=False, verbose=False)
-    s_opts = dict(print_level=0, tol=1e-4)
+    s_opts = dict(print_level=0, tol=1e-3)
     opti.solver("ipopt", p_opts, s_opts)
     sol = opti.solve()
     global U_sol, u_idx
