@@ -34,7 +34,7 @@ def key_released():
     global keys
     keys[key.name.upper()] = False
     if key.name.upper() == "S":
-        solver_input(path.get_next_n(2))
+        solve_input(path.get_next_n(2))
     if key.name.upper() == "R":
         rocket.pos.x = width / 2
         rocket.pos.y = height / 2
@@ -42,7 +42,7 @@ def key_is_down(k):
     global keys
     return keys.get(str(k).upper(), False)
 
-def solver_input(waypnts):
+def solve_input(waypnts):
     global rocket
     # Number of frames to compute ahead of time, the horizon width.
     N = 200
@@ -177,20 +177,11 @@ class Rocket:
 
     def updateWithInput(self, controller):
         # Angular section
-        self.angular_accel = controller.yaw * YAW_ACCEL
-        self.angular_vel += self.angular_accel
-        self.angular_vel *= ANG_VEL_DAMPING
-        # Clamp angular vel.
-        if abs(self.angular_vel) > MAX_ANG_VEL:
-            self.angular_vel = MAX_ANG_VEL * (1 if self.angular_vel > 0 else -1)
         self.angle += self.angular_vel
-        if self.angle > PI:
-            self.angle = -PI
-        elif self.angle < -PI:
-            self.angle = PI
-
+        self.angular_vel = (self.angular_vel + controller.yaw * YAW_ACCEL) * ANG_VEL_DAMPING;
+        self.angular_vel = max(-MAX_ANG_VEL, min(self.angular_vel, MAX_ANG_VEL))
         # Translation section
-        # Re-compute acceleration from scratch every frame.
+        self.pos += self.vel
         self.accel *= 0
         self.accel.y = GRAVITY
         self.boosting = controller.hold_boost
@@ -201,7 +192,6 @@ class Rocket:
         self.vel += self.accel
         # Clamp vel.
         self.vel.limit(MAX_VEL)
-        self.pos += self.vel
         # self.wrapBounds()
 
     def wrapBounds(self):
