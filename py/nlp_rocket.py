@@ -38,6 +38,8 @@ def key_released():
     if key.name.upper() == "R":
         rocket.pos.x = width / 2
         rocket.pos.y = height / 2
+        rocket.vel.x = 0
+        rocket.vel.y = 0
 def key_is_down(k):
     global keys
     return keys.get(str(k).upper(), False)
